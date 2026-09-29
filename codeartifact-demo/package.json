@@ -1,0 +1,11 @@
+{
+  "name": "socorro-demo-utils",
+  "version": "1.0.0",
+  "description": "Pacote demonstrativo para publicação no AWS CodeArtifact",
+  "main": "index.js",
+  "files": ["index.js", "README.md"],
+  "scripts": {
+    "test": "node -e \"const pkg = require('./'); if (pkg.formatServiceName('  Pintura residencial ' ) !== 'Pintura residencial') process.exit(1); console.log('OK')\""
+  },
+  "license": "UNLICENSED"
+}
