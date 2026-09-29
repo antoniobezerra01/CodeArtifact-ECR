@@ -12,7 +12,7 @@ Explorando e documentando os principais recursos do **AWS CodeArtifact** e do **
 ## Pré-requisitos
 
 - Uma conta AWS com permissões para CodeArtifact, ECR e IAM.
-- AWS CLI instalada e configurada:
+- AWS CLI instalada e configurada no WSL:
 
 	```bash
 	aws configure
@@ -29,7 +29,7 @@ export AWS_REGION=us-east-1
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ```
 
-> No Windows PowerShell, use `$env:AWS_REGION = "us-east-1"` e `$env:AWS_ACCOUNT_ID = (aws sts get-caller-identity --query Account --output text)`.
+Os exemplos deste repositório usam Bash no WSL. Não é necessário configurar o npm globalmente: os scripts usam um `.npmrc` temporário com o token do CodeArtifact.
 
 ## AWS CodeArtifact
 
@@ -59,6 +59,7 @@ aws codeartifact create-domain \
 aws codeartifact create-repository \
 	--domain "$CODEARTIFACT_DOMAIN" \
 	--repository "$CODEARTIFACT_REPOSITORY" \
+	--domain-owner "$AWS_ACCOUNT_ID" \
 	--description "Repositório privado de pacotes" \
 	--region "$AWS_REGION"
 ```
@@ -90,16 +91,10 @@ export CODEARTIFACT_ENDPOINT=$(aws codeartifact get-repository-endpoint \
 	--query repositoryEndpoint \
 	--output text)
 
-npm config set registry="${CODEARTIFACT_ENDPOINT}/"
-npm config set "//${CODEARTIFACT_ENDPOINT#https:}/:_authToken" "$CODEARTIFACT_AUTH_TOKEN"
+Para este repositório, use `scripts/publish-codeartifact.sh` e `scripts/consume-codeartifact.sh`. Eles configuram o endpoint apenas durante o comando e removem o token ao terminar.
 ```
 
-Depois disso, publique e instale pacotes conforme o fluxo do projeto:
-
-```bash
-npm publish
-npm install nome-do-pacote
-```
+Depois disso, use os scripts deste repositório para publicar e consumir o pacote. Eles configuram o token de autenticação temporariamente, sem alterar o registry global do npm.
 
 Para Maven, NuGet e Python, consulte os comandos específicos gerados pelo botão **View connection instructions** do repositório no console ou pelo comando `aws codeartifact get-repository-endpoint`.
 
@@ -110,6 +105,91 @@ Para Maven, NuGet e Python, consulte os comandos específicos gerados pelo botã
 - Integração com CodeBuild, GitHub Actions e outros pipelines.
 - Retenção, limpeza de versões e custos.
 - Uso de VPC endpoints quando o build não deve acessar a internet.
+
+## Fluxo reproduzível deste projeto
+
+O repositório contém dois exemplos independentes. O projeto Expo `socorro` fica disponível como referência, mas não é necessário para executar os testes de CodeArtifact e ECR:
+
+- `codeartifact-demo/`: pacote npm pequeno para publicar e consumir no CodeArtifact.
+- `ecr-demo/`: aplicação web mínima construída com Node dentro do Docker e servida com Nginx.
+
+Os comandos abaixo usam Bash no WSL e devem ser executados na raiz deste repositório.
+
+### Pré-requisitos
+
+- AWS CLI configurada (`aws configure`).
+- Node.js e npm instalados.
+- Docker Desktop iniciado para o fluxo do ECR.
+- Permissões IAM para CodeArtifact, ECR e `sts:GetCallerIdentity`.
+
+### 1. Definir variáveis AWS
+
+```bash
+export AWS_REGION="us-east-1"
+export CODEARTIFACT_DOMAIN="meu-dominio"
+export CODEARTIFACT_REPOSITORY="meu-repositorio"
+export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+```
+
+### 2. Criar o domínio e o repositório CodeArtifact
+
+```bash
+aws codeartifact create-domain \
+	--domain "$CODEARTIFACT_DOMAIN" \
+	--region "$AWS_REGION"
+
+aws codeartifact create-repository \
+	--domain "$CODEARTIFACT_DOMAIN" \
+	--repository "$CODEARTIFACT_REPOSITORY" \
+	--domain-owner "$AWS_ACCOUNT_ID" \
+	--region "$AWS_REGION"
+```
+
+Se os recursos já existirem, esses dois comandos podem retornar erro; nesse caso, continue para a publicação.
+
+### 3. Publicar e consumir no CodeArtifact
+
+O script solicita um token temporário, cria um `.npmrc` temporário e o remove ao terminar:
+
+```bash
+chmod +x scripts/*.sh
+./scripts/publish-codeartifact.sh
+./scripts/consume-codeartifact.sh
+```
+
+O segundo script instala `socorro-demo-utils` em `codeartifact-demo-consumer/` e executa a função publicada. Essa função representa uma pequena parte reutilizável do app, como normalização de nomes de serviços. O token não é salvo no projeto.
+
+### 4. Criar o repositório ECR
+
+```bash
+aws ecr create-repository \
+	--repository-name socorro-web \
+	--image-scanning-configuration scanOnPush=true \
+	--region "$AWS_REGION"
+```
+
+### 5. Gerar e testar a imagem localmente
+
+```bash
+docker build -f ecr-demo/Dockerfile -t socorro-web:1.0.0 .
+docker run --rm -p 8080:80 socorro-web:1.0.0
+```
+
+Abra `http://localhost:8080` no navegador. O build é reduzido de propósito: a etapa Node simula a construção da aplicação e a etapa Nginx simula o runtime da imagem publicada no ECR. O `socorro` não é necessário para esse teste.
+
+### 6. Publicar a imagem no ECR
+
+```bash
+export ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+aws ecr get-login-password --region "$AWS_REGION" |
+	docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+docker tag socorro-web:1.0.0 "$ECR_REGISTRY/socorro-web:1.0.0"
+docker push "$ECR_REGISTRY/socorro-web:1.0.0"
+```
+
+Para limpar os recursos de teste depois, remova a imagem e o repositório ECR e, separadamente, as versões do pacote e o repositório CodeArtifact conforme a política da sua conta AWS.
 
 ## Amazon ECR
 
@@ -155,7 +235,7 @@ export IMAGE_TAG=1.0.0
 export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 export IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-docker build -t "$ECR_REPOSITORY:$IMAGE_TAG" .
+docker build -f ecr-demo/Dockerfile -t "$ECR_REPOSITORY:$IMAGE_TAG" .
 docker tag "$ECR_REPOSITORY:$IMAGE_TAG" "$IMAGE_URI"
 docker push "$IMAGE_URI"
 ```
@@ -187,19 +267,28 @@ docker pull "$IMAGE_URI"
 - Monitore acessos com CloudTrail e custos com AWS Cost Explorer.
 - Defina políticas de retenção para evitar acumular pacotes e imagens sem uso.
 
-## Estrutura planejada
+## Estrutura atual
 
 ```text
 .
 ├── README.md
-├── codeartifact/
-│   ├── conceitos.md
-│   ├── primeiros-passos.md
-│   └── boas-praticas.md
-└── ecr/
-		├── conceitos.md
-		├── primeiros-passos.md
-		└── boas-praticas.md
+├── codeartifact-demo/
+│   ├── index.js
+│   ├── package.json
+│   └── README.md
+├── ecr-demo/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── README.md
+│   └── app/
+│       ├── build.js
+│       ├── package.json
+│       └── src/index.html
+├── scripts/
+│   ├── publish-codeartifact.sh
+│   └── consume-codeartifact.sh
+└── socorro/
+    └── aplicativo Expo de referência
 ```
 
 ## Referências oficiais
